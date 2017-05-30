@@ -19,6 +19,7 @@ from haystack.models import SearchResult
 from haystack.utils import log as logging
 from haystack.utils import get_identifier, get_model_ct
 from haystack.utils.app_loading import haystack_get_model
+import pdb
 
 try:
     import elasticsearch
@@ -115,7 +116,7 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
         self.setup_complete = False
         self.existing_mapping = {}
 
-    def setup(self):
+    def setup(self, doc_type):
         """
         Defers loading until needed.
         """
@@ -133,7 +134,7 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
         unified_index = haystack.connections[self.connection_alias].get_unified_index()
         self.content_field_name, field_mapping = self.build_schema(unified_index.all_searchfields())
         current_mapping = {
-            'modelresult': {
+            doc_type: {
                 'properties': field_mapping,
             }
         }
@@ -142,7 +143,7 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
             try:
                 # Make sure the index is there first.
                 self.conn.indices.create(index=self.index_name, body=self.DEFAULT_SETTINGS, ignore=400)
-                self.conn.indices.put_mapping(index=self.index_name, doc_type='modelresult', body=current_mapping)
+                self.conn.indices.put_mapping(index=self.index_name, doc_type=doc_type, body=current_mapping)
                 self.existing_mapping = current_mapping
             except Exception:
                 if not self.silently_fail:
@@ -150,10 +151,10 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
 
         self.setup_complete = True
 
-    def update(self, index, iterable, commit=True):
+    def update(self, index, iterable, doc_type, commit=True):
         if not self.setup_complete:
             try:
-                self.setup()
+                self.setup(doc_type)
             except elasticsearch.TransportError as e:
                 if not self.silently_fail:
                     raise
@@ -187,17 +188,17 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
                                extra={"data": {"index": index,
                                                "object": get_identifier(obj)}})
 
-        bulk(self.conn, prepped_docs, index=self.index_name, doc_type='modelresult')
+        bulk(self.conn, prepped_docs, index=self.index_name, doc_type=doc_type)
 
         if commit:
             self.conn.indices.refresh(index=self.index_name)
 
-    def remove(self, obj_or_string, commit=True):
+    def remove(self, doc_type, obj_or_string, commit=True):
         doc_id = get_identifier(obj_or_string)
 
         if not self.setup_complete:
             try:
-                self.setup()
+                self.setup(doc_type)
             except elasticsearch.TransportError as e:
                 if not self.silently_fail:
                     raise
@@ -207,7 +208,7 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
                 return
 
         try:
-            self.conn.delete(index=self.index_name, doc_type='modelresult', id=doc_id, ignore=404)
+            self.conn.delete(index=self.index_name, doc_type=doc_type, id=doc_id, ignore=404)
 
             if commit:
                 self.conn.indices.refresh(index=self.index_name)
@@ -217,7 +218,7 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
 
             self.log.error("Failed to remove document '%s' from Elasticsearch: %s", doc_id, e, exc_info=True)
 
-    def clear(self, models=None, commit=True):
+    def clear(self, doc_type, models=None, commit=True):
         # We actually don't want to do this here, as mappings could be
         # very different.
         # if not self.setup_complete:
@@ -240,7 +241,7 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
                 # Delete by query in Elasticsearch asssumes you're dealing with
                 # a ``query`` root object. :/
                 query = {'query': {'query_string': {'query': " OR ".join(models_to_delete)}}}
-                self.conn.delete_by_query(index=self.index_name, doc_type='modelresult', body=query)
+                self.conn.delete_by_query(index=self.index_name, doc_type=doc_type, body=query)
         except elasticsearch.TransportError as e:
             if not self.silently_fail:
                 raise
@@ -492,15 +493,15 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
         return kwargs
 
     @log_query
-    def search(self, query_string, **kwargs):
+    def search(self, query_string, doc_type=False, **kwargs):
         if len(query_string) == 0:
             return {
                 'results': [],
                 'hits': 0,
             }
 
-        if not self.setup_complete:
-            self.setup()
+        if (not self.setup_complete) and (doc_type):
+            self.setup(doc_type)
 
         search_kwargs = self.build_search_kwargs(query_string, **kwargs)
         search_kwargs['from'] = kwargs.get('start_offset', 0)
@@ -518,10 +519,16 @@ class ElasticsearchSearchBackend(BaseSearchBackend):
             search_kwargs['size'] = end_offset - start_offset
 
         try:
-            raw_results = self.conn.search(body=search_kwargs,
-                                           index=self.index_name,
-                                           doc_type='modelresult',
-                                           _source=True)
+            if doc_type:
+           
+                raw_results = self.conn.search(body=search_kwargs,
+                                               index=self.index_name,
+                                               doc_type=doc_type,
+                                               _source=True)
+            else:
+                raw_results = self.conn.search(body=search_kwargs,
+                                               index=self.index_name,
+                                               _source=True)
         except elasticsearch.TransportError as e:
             if not self.silently_fail:
                 raise
@@ -940,7 +947,7 @@ class ElasticsearchSearchQuery(BaseSearchQuery):
 
         return search_kwargs
 
-    def run(self, spelling_query=None, **kwargs):
+    def run(self, doc_type=False, spelling_query=None, **kwargs):
         """Builds and executes the query. Returns a list of search results."""
         final_query = self.build_query()
         search_kwargs = self.build_params(spelling_query, **kwargs)
@@ -948,7 +955,7 @@ class ElasticsearchSearchQuery(BaseSearchQuery):
         if kwargs:
             search_kwargs.update(kwargs)
 
-        results = self.backend.search(final_query, **search_kwargs)
+        results = self.backend.search(final_query, doc_type=doc_type,**search_kwargs)
         self._results = results.get('results', [])
         self._hit_count = results.get('hits', 0)
         self._facet_counts = self.post_process_facets(results)

@@ -13,7 +13,7 @@ from haystack.constants import DEFAULT_OPERATOR, ITERATOR_LOAD_PER_QUERY
 from haystack.exceptions import NotHandled
 from haystack.inputs import AutoQuery, Raw
 from haystack.utils import log as logging
-
+import pdb
 
 class SearchQuerySet(object):
     """
@@ -21,9 +21,10 @@ class SearchQuerySet(object):
 
     Supports chaining (a la QuerySet) to narrow the search.
     """
-    def __init__(self, using=None, query=None):
+    def __init__(self, doc_type=False, using=None, query=None):
         # ``_using`` should only ever be a value other than ``None`` if it's
         # been forced with the ``.using`` method.
+        self.doc_type = doc_type
         self._using = using
         self.query = None
         self._determine_backend()
@@ -40,6 +41,7 @@ class SearchQuerySet(object):
         self._ignored_result_count = 0
         self.log = logging.getLogger('haystack')
 
+        
     def _determine_backend(self):
         # A backend has been manually selected. Use it instead.
         if self._using is not None:
@@ -205,7 +207,7 @@ class SearchQuerySet(object):
             # Revert to old behaviour
             return model._default_manager.in_bulk(pks)
 
-    def _fill_cache(self, start, end, **kwargs):
+    def _fill_cache(self, start, end,**kwargs):
         # Tell the query where to start from and how many we'd like.
         self.query._reset()
 
@@ -219,7 +221,7 @@ class SearchQuerySet(object):
             query_end += self._ignored_result_count
 
         self.query.set_limits(query_start, query_end)
-        results = self.query.get_results(**kwargs)
+        results = self.query.get_results(self.doc_type, **kwargs)
 
         if results is None or len(results) == 0:
             # trim missing stuff from the result cache
@@ -233,11 +235,11 @@ class SearchQuerySet(object):
         # an array of 100,000 ``None``s consumed less than .5 Mb, which ought
         # to be an acceptable loss for consistent and more efficient caching.
         if len(self._result_cache) == 0:
-            self._result_cache = [None] * self.query.get_count()
+            self._result_cache = [None] * self.query.get_count(self.doc_type)
 
         fill_start, fill_end = start, end
         if fill_end is None:
-            fill_end = self.query.get_count()
+            fill_end = self.query.get_count(self.doc_type)
         cache_start = fill_start
 
         while True:
@@ -254,7 +256,7 @@ class SearchQuerySet(object):
                 # Tell the query where to start from and how many we'd like.
                 self.query._reset()
                 self.query.set_limits(fill_start, fill_end)
-                results = self.query.get_results()
+                results = self.query.get_results(self.doc_type)
 
                 if results is None or len(results) == 0:
                     # No more results. Trim missing stuff from the result cache
@@ -331,6 +333,7 @@ class SearchQuerySet(object):
     def filter_and(self, *args, **kwargs):
         """Narrows the search by looking for (and including) certain attributes."""
         clone = self._clone()
+        clone.doc_type = self.doc_type
         clone.query.add_filter(SQ(*args, **kwargs))
         return clone
 
@@ -616,6 +619,7 @@ class SearchQuerySet(object):
 
         query = self.query._clone()
         clone = klass(query=query)
+        clone.doc_type = self.doc_type
         clone._load_all = self._load_all
         return clone
 
